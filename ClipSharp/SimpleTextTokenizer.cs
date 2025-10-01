@@ -24,11 +24,14 @@ public partial class SimpleTextTokenizer : ITextTokenizer
 
     private Dictionary<string, string> _bpeCache;
 
-    public static SimpleTextTokenizer Load()
+    public static SimpleTextTokenizer Load(string? vocabPath = null)
     {
+        // Use default path if none provided
+        vocabPath ??= "./bpe_simple_vocab_16e6.txt.gz";
+        
         // generate vocab encoder
         var merges = new List<string>();
-        using (var fileStream = new FileStream("./bpe_simple_vocab_16e6.txt.gz", FileMode.Open))
+        using (var fileStream = new FileStream(vocabPath, FileMode.Open))
         using (var textStream = new GZipStream(fileStream, CompressionMode.Decompress))
         {
             var reader = new StreamReader(textStream);

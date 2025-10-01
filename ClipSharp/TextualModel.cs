@@ -1,6 +1,7 @@
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace ClipSharp;
 
@@ -23,8 +24,23 @@ public class TextualModel
 
         };
 
-        options.AppendExecutionProvider_CUDA();
+        // Always use CPU execution provider
         options.AppendExecutionProvider_CPU();
+        
+        // Only try CUDA on desktop platforms (not mobile)
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Create("Android")) && 
+            !RuntimeInformation.IsOSPlatform(OSPlatform.Create("iOS")) &&
+            !RuntimeInformation.IsOSPlatform(OSPlatform.Create("Tizen")))
+        {
+            try
+            {
+                options.AppendExecutionProvider_CUDA();
+            }
+            catch
+            {
+                // CUDA not available, continue with CPU only
+            }
+        }
         // options.RegisterOrtExtensions();
 
         var session = new InferenceSession(modelPath, options);
@@ -71,7 +87,7 @@ public class TextualModel
 
         using var results = _session.Run(new[] { NamedOnnxValue.CreateFromTensor(_inputName, inputTensor) });
         using var result = results.First();
-        var embeddings = (DenseTensor<Float16>)result.Value;
+        var embeddings = (DenseTensor<float>)result.Value;
 
         var output = new float[embeddings.Dimensions[0]][];
         for (int i = 0; i< embeddings.Dimensions[0]; i++)
@@ -79,7 +95,7 @@ public class TextualModel
             output[i] = new float[embeddings.Dimensions[1]];
             for (int j = 0; j < embeddings.Dimensions[1]; j++)
             {
-                output[i][j] = embeddings[i,j].ToSingle();
+                output[i][j] = embeddings[i,j];
             }
         }
 

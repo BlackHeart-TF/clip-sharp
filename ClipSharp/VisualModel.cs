@@ -1,8 +1,7 @@
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
-using SixLabors.ImageSharp.Processing;
+using SkiaSharp;
+using System.Runtime.InteropServices;
 
 namespace ClipSharp;
 
@@ -23,8 +22,23 @@ public class VisualModel
 
         };
 
-        options.AppendExecutionProvider_CUDA();
+        // Always use CPU execution provider
         options.AppendExecutionProvider_CPU();
+        
+        // Only try CUDA on desktop platforms (not mobile)
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Create("Android")) && 
+            !RuntimeInformation.IsOSPlatform(OSPlatform.Create("iOS")) &&
+            !RuntimeInformation.IsOSPlatform(OSPlatform.Create("Tizen")))
+        {
+            try
+            {
+                options.AppendExecutionProvider_CUDA();
+            }
+            catch
+            {
+                // CUDA not available, continue with CPU only
+            }
+        }
         // options.RegisterOrtExtensions();
 
         var session = new InferenceSession(modelPath, options);
@@ -54,13 +68,13 @@ public class VisualModel
     {
         var imgFs = images.Select(img => ImageToVector(img)).ToArray();
 
-        Memory<Float16> tokens = imgFs.SelectMany(l => l.ToFlatArray()).ToArray();
-        var inputTensor = new DenseTensor<Float16>(tokens, new[] { images.Length, 3, 224, 224 });
+        Memory<float> tokens = imgFs.SelectMany(l => l.ToFlatArray()).ToArray();
+        var inputTensor = new DenseTensor<float>(tokens, new[] { images.Length, 3, 224, 224 });
 
         using var results = _session.Run(new[] { NamedOnnxValue.CreateFromTensor(_inputName, inputTensor) });
 
         using var result = results.First();
-        var embeddings = (DenseTensor<Float16>)result.Value;
+        var embeddings = (DenseTensor<float>)result.Value;
 
         var output = new float[embeddings.Dimensions[0]][];
         for (int i = 0; i < embeddings.Dimensions[0]; i++)
@@ -68,7 +82,7 @@ public class VisualModel
             output[i] = new float[embeddings.Dimensions[1]];
             for (int j = 0; j < embeddings.Dimensions[1]; j++)
             {
-                output[i][j] = embeddings[i, j].ToSingle();
+                output[i][j] = embeddings[i, j];
             }
         }
 
@@ -77,41 +91,33 @@ public class VisualModel
 
     private static float[,,] ImageToVector(string imagePath)
     {
-        var image = Image.Load<Rgba32>(imagePath);
-        var orgWidth = image.Width;
-        var orgHeight = image.Height;
-
-        // resize
-        // center crop
-        image.Mutate(x =>
+        using var originalBitmap = SKBitmap.Decode(imagePath);
+        if (originalBitmap == null)
         {
-            var min = Math.Min(orgWidth, orgHeight);
-            x.Crop(new Rectangle((orgWidth - min) / 2, (orgHeight - min) / 2, min, min));
-            x.Resize(224, 224);
-        });
-
-        // convert rgb
-        // to float
-        return ToNormalizedColorHeightWidthArray(image);
+            throw new InvalidOperationException("Could not decode image data");
+        }
+        
+        // Resize to 224x224
+        using var resizedBitmap = originalBitmap.Resize(new SKImageInfo(224, 224), SKFilterQuality.High);
+        
+        // Convert to normalized CHW format
+        return ToNormalizedColorHeightWidthArray(resizedBitmap);
     }
 
-    public static float[,,] ToNormalizedColorHeightWidthArray(Image<Rgba32> image)
+    public static float[,,] ToNormalizedColorHeightWidthArray(SKBitmap bitmap)
     {
-        //var img = new NDArray<float>(new Shape(3, image.Height, image.Width));
-        var img = new float[3, image.Height, image.Width];
+        var img = new float[3, bitmap.Height, bitmap.Width];
 
-        for (var y = 0; y < image.Height; y++)
+        for (var y = 0; y < bitmap.Height; y++)
         {
-            for (var x = 0; x < image.Width; x++)
+            for (var x = 0; x < bitmap.Width; x++)
             {
-                var p = image[x, y];
-                //img[0, y, x] = (p.R - 127) / 128f;
-                //img[1, y, x] = (p.G - 127) / 128f;
-                //img[2, y, x] = (p.B - 127) / 128f;
-
-                img[0, y, x] = (p.R / 255f - 0.48145466f) / 0.26862954f;
-                img[1, y, x] = (p.G / 255f - 0.4578275f) / 0.26130258f;
-                img[2, y, x] = (p.B / 255f - 0.40821073f) / 0.27577711f;
+                var pixel = bitmap.GetPixel(x, y);
+                
+                // CLIP normalization (ImageNet stats)
+                img[0, y, x] = (pixel.Red / 255f - 0.48145466f) / 0.26862954f;   // Red
+                img[1, y, x] = (pixel.Green / 255f - 0.4578275f) / 0.26130258f; // Green  
+                img[2, y, x] = (pixel.Blue / 255f - 0.40821073f) / 0.27577711f;  // Blue
             }
         }
 

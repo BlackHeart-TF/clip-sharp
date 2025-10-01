@@ -4,13 +4,13 @@ namespace ClipSharp;
 
 public static class ArrayUtils
 {
-    public static Float16[] ToFlatArray(this float[,,] input)
+    public static float[] ToFlatArray(this float[,,] input)
     {
         var I = input.GetLength(0);
         var J = input.GetLength(1);
         var K = input.GetLength(2);
 
-        var z = new Float16[I * J * K];
+        var z = new float[I * J * K];
         var x = 0;
         for (var i = 0; i < I; i++)
         {
@@ -18,7 +18,7 @@ public static class ArrayUtils
             {
                 for (var k = 0; k < K; k++)
                 {
-                    z[x++] = input[i, j, k].ToFloat16();
+                    z[x++] = input[i, j, k];
                 }
             }
         }
