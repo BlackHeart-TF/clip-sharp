@@ -1,4 +1,4 @@
-# clip-sharp
+# clip-sharp.float32
 
 Based on https://huggingface.co/mlunar/clip-variants
 and https://github.com/dansav/clip-sharp
