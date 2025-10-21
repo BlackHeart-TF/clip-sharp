@@ -1,4 +1,4 @@
-﻿namespace ClipSharp;
+namespace ClipSharp;
 
 public interface ITextTokenizer
 {

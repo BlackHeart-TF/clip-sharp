@@ -1,18 +1,24 @@
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
-using SkiaSharp;
+using System.Numerics;
 using System.Runtime.InteropServices;
+#if SKIASHARP
+using ClipSharp.SkiaSharp;
+#elif IMAGESHARP
+using ClipSharp.ImageSharp;
+#endif
 
 namespace ClipSharp;
 
-public class VisualModel
+public class VisualModel<T> : IDisposable where T : struct, INumber<T>
 {
     private readonly InferenceSession _session;
+    private readonly IImageProcessor<T> _imageProcessor;
     private readonly int _inputSize;
     private readonly string _inputName;
     private readonly string _outputName;
 
-    public static VisualModel Load(string modelPath)
+    public static VisualModel<T> Load(string modelPath, IImageProcessor<T> imageProcessor)
     {
         var options = new SessionOptions
         {
@@ -32,23 +38,75 @@ public class VisualModel
         {
             try
             {
-                options.AppendExecutionProvider_CUDA();
+                // Try CUDA with explicit device ID
+                options.AppendExecutionProvider_CUDA(0);
+                Console.WriteLine("CUDA provider enabled");
             }
-            catch
+            catch (Exception ex)
             {
-                // CUDA not available, continue with CPU only
+                Console.WriteLine($"CUDA not available: {ex.Message}");
             }
         }
         // options.RegisterOrtExtensions();
 
         var session = new InferenceSession(modelPath, options);
 
-        return new VisualModel(session);
+        return new VisualModel<T>(session, imageProcessor);
     }
 
-    public VisualModel(InferenceSession session)
+    /// <summary>
+    /// Creates a VisualModel with automatic processor selection based on available libraries
+    /// </summary>
+    public static VisualModel<T> Load(string modelPath)
+    {
+        IImageProcessor<T> processor = CreateDefaultProcessor<T>();
+        
+        var options = new SessionOptions
+        {
+            GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
+        };
+
+        // Always use CPU execution provider
+        options.AppendExecutionProvider_CPU();
+        
+        // Only try CUDA on desktop platforms (not mobile)
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Create("Android")) && 
+            !RuntimeInformation.IsOSPlatform(OSPlatform.Create("iOS")) &&
+            !RuntimeInformation.IsOSPlatform(OSPlatform.Create("Tizen")))
+        {
+            try
+            {
+                // Try CUDA with explicit device ID
+                options.AppendExecutionProvider_CUDA(0);
+                Console.WriteLine("CUDA provider enabled");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"CUDA not available: {ex.Message}");
+            }
+        }
+
+        var session = new InferenceSession(modelPath, options);
+
+        return new VisualModel<T>(session, processor);
+    }
+
+    private static IImageProcessor<T> CreateDefaultProcessor<T>() where T : struct, INumber<T>
+    {
+#if SKIASHARP
+        return new SkiaSharpImageProcessor<T>();
+#elif IMAGESHARP
+        return new ImageSharpImageProcessor<T>();
+#else
+        throw new InvalidOperationException(
+            "No image processor specified. Install ClipSharp.SkiaSharp or ClipSharp.ImageSharp package.");
+#endif
+    }
+
+    public VisualModel(InferenceSession session, IImageProcessor<T> imageProcessor)
     {
         _session = session;
+        _imageProcessor = imageProcessor;
 
         var input = _session.InputMetadata.First();
         if (input.Value.Dimensions.Length != 4 || input.Value.Dimensions[2] != input.Value.Dimensions[3])
@@ -63,23 +121,25 @@ public class VisualModel
         _outputName = output.Key;
     }
 
-
-    public IReadOnlyCollection<float[]> Encode(string[] images)
+    public IReadOnlyCollection<T[]> Encode(string[] images)
     {
-        var imgFs = images.Select(img => ImageToVector(img)).ToArray();
+        var imgFs = images.Select(img => _imageProcessor.LoadAndProcessImage(img)).ToArray();
 
-        Memory<float> tokens = imgFs.SelectMany(l => l.ToFlatArray()).ToArray();
-        var inputTensor = new DenseTensor<float>(tokens, new[] { images.Length, 3, 224, 224 });
+        // Convert to the appropriate tensor type
+        var tokens = imgFs.SelectMany(l => l.ToFlatArray()).ToArray();
+        
+        // Create tensor based on type
+        var inputTensor = new DenseTensor<T>(tokens, new[] { images.Length, 3, 224, 224 });
 
         using var results = _session.Run(new[] { NamedOnnxValue.CreateFromTensor(_inputName, inputTensor) });
 
         using var result = results.First();
-        var embeddings = (DenseTensor<float>)result.Value;
+        var embeddings = (DenseTensor<T>)result.Value;
 
-        var output = new float[embeddings.Dimensions[0]][];
+        var output = new T[embeddings.Dimensions[0]][];
         for (int i = 0; i < embeddings.Dimensions[0]; i++)
         {
-            output[i] = new float[embeddings.Dimensions[1]];
+            output[i] = new T[embeddings.Dimensions[1]];
             for (int j = 0; j < embeddings.Dimensions[1]; j++)
             {
                 output[i][j] = embeddings[i, j];
@@ -89,38 +149,8 @@ public class VisualModel
         return output;
     }
 
-    private static float[,,] ImageToVector(string imagePath)
+    public void Dispose()
     {
-        using var originalBitmap = SKBitmap.Decode(imagePath);
-        if (originalBitmap == null)
-        {
-            throw new InvalidOperationException("Could not decode image data");
-        }
-        
-        // Resize to 224x224
-        using var resizedBitmap = originalBitmap.Resize(new SKImageInfo(224, 224), SKFilterQuality.High);
-        
-        // Convert to normalized CHW format
-        return ToNormalizedColorHeightWidthArray(resizedBitmap);
-    }
-
-    public static float[,,] ToNormalizedColorHeightWidthArray(SKBitmap bitmap)
-    {
-        var img = new float[3, bitmap.Height, bitmap.Width];
-
-        for (var y = 0; y < bitmap.Height; y++)
-        {
-            for (var x = 0; x < bitmap.Width; x++)
-            {
-                var pixel = bitmap.GetPixel(x, y);
-                
-                // CLIP normalization (ImageNet stats)
-                img[0, y, x] = (pixel.Red / 255f - 0.48145466f) / 0.26862954f;   // Red
-                img[1, y, x] = (pixel.Green / 255f - 0.4578275f) / 0.26130258f; // Green  
-                img[2, y, x] = (pixel.Blue / 255f - 0.40821073f) / 0.27577711f;  // Blue
-            }
-        }
-
-        return img;
+        _session?.Dispose();
     }
 }

@@ -1,11 +1,12 @@
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using System.Diagnostics;
+using System.Numerics;
 using System.Runtime.InteropServices;
 
 namespace ClipSharp;
 
-public class TextualModel
+public class TextualModel<T> : IDisposable where T : struct, INumber<T>
 {
     private readonly InferenceSession _session;
     private readonly ITextTokenizer _tokenizer;
@@ -14,7 +15,7 @@ public class TextualModel
     private readonly string _inputName;
     private readonly string _outputName;
 
-    public static TextualModel Load(string modelPath, ITextTokenizer tokenizer)
+    public static TextualModel<T> Load(string modelPath, ITextTokenizer tokenizer)
     {
         var options = new SessionOptions
         {
@@ -45,12 +46,13 @@ public class TextualModel
 
         var session = new InferenceSession(modelPath, options);
 
-        return new TextualModel(session, tokenizer);
+        return new TextualModel<T>(session, tokenizer);
     }
 
     public TextualModel(InferenceSession session, ITextTokenizer tokenizer)
     {
         _session = session;
+        _tokenizer = tokenizer;
 
         var input = _session.InputMetadata.First().Value;
 
@@ -65,12 +67,10 @@ public class TextualModel
 
         _outputName = session.OutputNames.First();
 
-        _tokenizer = tokenizer;
-
         _padding = Enumerable.Range(0, 77).Select(i => tokenizer.EotToken).ToArray(); // todo
     }
 
-    public IReadOnlyCollection<float[]> Encode(IReadOnlyCollection<string> texts)
+    public IReadOnlyCollection<T[]> Encode(IReadOnlyCollection<string> texts)
     {
         var textTokens = new List<IEnumerable<int>>();
 
@@ -87,12 +87,12 @@ public class TextualModel
 
         using var results = _session.Run(new[] { NamedOnnxValue.CreateFromTensor(_inputName, inputTensor) });
         using var result = results.First();
-        var embeddings = (DenseTensor<float>)result.Value;
+        var embeddings = (DenseTensor<T>)result.Value;
 
-        var output = new float[embeddings.Dimensions[0]][];
+        var output = new T[embeddings.Dimensions[0]][];
         for (int i = 0; i< embeddings.Dimensions[0]; i++)
         {
-            output[i] = new float[embeddings.Dimensions[1]];
+            output[i] = new T[embeddings.Dimensions[1]];
             for (int j = 0; j < embeddings.Dimensions[1]; j++)
             {
                 output[i][j] = embeddings[i,j];
@@ -105,5 +105,10 @@ public class TextualModel
     private IEnumerable<int> Pad(IEnumerable<int> input)
     {
         return input.Concat(_padding).Take(_inputSize);
+    }
+
+    public void Dispose()
+    {
+        _session?.Dispose();
     }
 }
